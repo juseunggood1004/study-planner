@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from datetime import date
 from typing import Any
 
@@ -9,6 +10,9 @@ import httpx
 
 from .config import Settings
 from .schemas import ContentItem, ExtractedContents, ReplanRequest, Schedule, ScheduleRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIServiceError(Exception):
@@ -85,16 +89,30 @@ class OpenAIService:
         self.settings = settings
 
     async def extract_contents(self, image_bytes: bytes, mime_type: str) -> ExtractedContents:
-        encoded_image = base64.b64encode(image_bytes).decode("ascii")
+        return await self.extract_contents_images([(image_bytes, mime_type)])
+
+    async def extract_contents_images(self, images: list[tuple[bytes, str]]) -> ExtractedContents:
+        image_parts = [
+            {
+                "type": "input_image",
+                "image_url": f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}",
+            }
+            for image_bytes, mime_type in images
+        ]
         payload = {
             "model": self.settings.openai_model,
             "input": [{"role": "user", "content": [
                 {"type": "input_text", "text": (
-                    "Read this book table-of-contents image. Return every visible chapter and section in order. "
-                    "Keep original Korean or other-language wording. Create stable short IDs such as c1-s2. "
-                    "Use null for section when no section label is present. Estimate minutes only when strongly implied; otherwise null."
+                    "Read these book table-of-contents images in the order provided. Images may be consecutive or overlap. "
+                    "Return one item for every visible numbered section, in book order, and remove duplicates caused by overlapping pages. "
+                    "Set chapter to the full parent chapter label and title, such as 'I 다항식'. "
+                    "Set section to the printed section number and title to the section title. "
+                    "Do not emit a separate chapter-only item when numbered child sections are visible. "
+                    "Only when a chapter has no visible child sections, return one item with section null. "
+                    "Keep original Korean or other-language wording and create stable short IDs such as c1-s2. "
+                    "Estimate minutes only when strongly implied; otherwise null."
                 )},
-                {"type": "input_image", "image_url": f"data:{mime_type};base64,{encoded_image}"},
+                *image_parts,
             ]}],
             "text": {"format": {"type": "json_schema", "name": "table_of_contents", "strict": True, "schema": CONTENT_SCHEMA}},
         }
@@ -110,9 +128,12 @@ class OpenAIService:
             plan_context["completed_content_ids"] = replan.completed_content_ids
             plan_context["original_schedule"] = replan.original_schedule.model_dump(mode="json") if replan.original_schedule else None
         instruction = (
-            "Create a realistic study schedule from the supplied JSON. Schedule only on days with available minutes, "
+            "Create a realistic study schedule for either a book or an arbitrary learning goal from the supplied JSON. "
+            "Treat book_title as the plan title for backward compatibility and use goal_type to understand its kind. "
+            "Schedule only on days with available minutes, "
             "never exceed each day's available minutes when blocks, breaks, review, and buffer are combined, and assign every remaining content id. "
-            "Use the preferred start time, split long work around focus/break preferences, balance workload, and keep a modest review/buffer near the deadline when feasible. "
+            "Date-specific overrides take priority over weekday defaults for available time, start time, focus length, and breaks. "
+            "Use the applicable preferred start time, split long work around focus/break preferences, balance workload, and keep a modest review/buffer near the deadline when feasible. "
             "If completion is impossible, still make the best possible schedule and explain the shortfall in warnings. "
             "Do not schedule completed_content_ids. Write titles, notes, summary, and warnings in Korean."
         )
@@ -149,15 +170,59 @@ class OpenAIService:
             raise OpenAIServiceError("AI 서비스를 사용할 수 없습니다. API 키와 사용 한도를 확인해 주세요.") from exc
         except httpx.HTTPError as exc:
             raise OpenAIServiceError("AI 서비스에 연결할 수 없습니다. 네트워크를 확인해 주세요.") from exc
-        output_text = data.get("output_text")
-        if not isinstance(output_text, str) or not output_text.strip():
-            raise OpenAIServiceError("AI가 빈 응답을 반환했습니다. 다시 시도해 주세요.")
+        try:
+            return _extract_output_text(data)
+        except OpenAIServiceError:
+            raw_output = data.get("output")
+            output_items = raw_output if isinstance(raw_output, list) else []
+            logger.warning(
+                "OpenAI response contained no usable text (response_id=%s, status=%s, output_types=%s)",
+                data.get("id"),
+                data.get("status"),
+                [item.get("type") for item in output_items if isinstance(item, dict)],
+            )
+            raise
+
+
+def _extract_output_text(data: dict[str, Any]) -> str:
+    """Read text from both SDK-style and raw Responses API payloads."""
+    if data.get("status") == "incomplete":
+        raise OpenAIServiceError("AI 응답이 완료되기 전에 중단되었습니다. 다시 시도해 주세요.")
+    if data.get("status") == "failed" or data.get("error"):
+        raise OpenAIServiceError("AI가 요청 처리에 실패했습니다. 다시 시도해 주세요.")
+
+    # Some compatible gateways and SDK-serialized objects expose this helper.
+    shortcut = data.get("output_text")
+    if isinstance(shortcut, str) and shortcut.strip():
+        return shortcut
+
+    text_parts: list[str] = []
+    refused = False
+    raw_output = data.get("output")
+    output_items = raw_output if isinstance(raw_output, list) else []
+    for item in output_items:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for part in item.get("content", []):
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+            elif part.get("type") == "refusal":
+                refused = True
+
+    output_text = "".join(text_parts)
+    if output_text.strip():
         return output_text
+    if refused:
+        raise OpenAIServiceError("AI가 이 이미지의 처리를 거부했습니다. 다른 이미지를 사용해 주세요.")
+    raise OpenAIServiceError("AI가 텍스트 없이 응답했습니다. 다시 시도해 주세요.")
 
 
 def _validate_schedule(schedule: Schedule, request: ScheduleRequest, completed_ids: set[str]) -> None:
     """Reject model output that would create an unusable or misleading schedule."""
     available_by_weekday = {entry.weekday: entry.available_minutes for entry in request.preferences.daily_availability}
+    override_by_date = {entry.date: entry for entry in request.preferences.date_overrides}
     valid_ids = {item.id for item in request.contents}
     remaining_ids = valid_ids - completed_ids
     scheduled_ids: list[str] = []
@@ -169,7 +234,8 @@ def _validate_schedule(schedule: Schedule, request: ScheduleRequest, completed_i
         dates.add(day.date)
         if day.date < date.today() or day.date > request.preferences.deadline:
             raise OpenAIServiceError("AI가 학습 기간 밖의 일정을 만들었습니다. 다시 생성해 주세요.")
-        daily_limit = available_by_weekday.get(day.date.weekday(), 0)
+        override = override_by_date.get(day.date)
+        daily_limit = override.available_minutes if override else available_by_weekday.get(day.date.weekday(), 0)
         used_minutes = day.review_minutes + day.buffer_minutes
         for block in day.blocks:
             scheduled_ids.extend(block.content_ids)

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 import 'models.dart';
 
@@ -23,15 +24,32 @@ class ApiClient {
   final http.Client _client;
   final String _baseUrl;
 
-  Future<List<ContentItem>> extractContents(File image) async {
+  Future<List<ContentItem>> extractContents(List<File> images) async {
+    if (images.isEmpty) throw ApiException('이미지를 한 장 이상 선택해 주세요.');
     final request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/contents/extract'));
-    request.files.add(await http.MultipartFile.fromPath('image', image.path));
+    for (final image in images) {
+      request.files.add(await http.MultipartFile.fromPath(
+        'images',
+        image.path,
+        contentType: _imageContentType(image.path),
+      ));
+    }
     final streamed = await request.send().timeout(const Duration(seconds: 70));
     final response = await http.Response.fromStream(streamed);
     final json = _decode(response);
     return (json['items'] as List)
         .map((value) => ContentItem.fromJson(value as Map<String, dynamic>))
         .toList();
+  }
+
+  MediaType _imageContentType(String path) {
+    final extension = path.toLowerCase().split('.').last;
+    return switch (extension) {
+      'jpg' || 'jpeg' => MediaType('image', 'jpeg'),
+      'png' => MediaType('image', 'png'),
+      'webp' => MediaType('image', 'webp'),
+      _ => MediaType('application', 'octet-stream'),
+    };
   }
 
   Future<Schedule> generate(LocalPlanDraft draft) => _schedule('/schedules/generate', draft.toRequestJson());
@@ -70,13 +88,20 @@ class ApiClient {
 }
 
 class LocalPlanDraft {
-  LocalPlanDraft({required this.bookTitle, required this.contents, required this.preferences});
-  final String bookTitle;
+  LocalPlanDraft({
+    required this.title,
+    required this.kind,
+    required this.contents,
+    required this.preferences,
+  });
+  final String title;
+  final PlanKind kind;
   final List<ContentItem> contents;
   final StudyPreferences preferences;
 
   Map<String, dynamic> toRequestJson() => {
-        'book_title': bookTitle,
+        'book_title': title,
+        'goal_type': kind.name,
         'contents': contents.map((item) => item.toJson()).toList(),
         'preferences': preferences.toJson(),
       };

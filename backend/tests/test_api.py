@@ -11,6 +11,9 @@ class FakeService:
     async def extract_contents(self, image_bytes: bytes, mime_type: str) -> ExtractedContents:
         return ExtractedContents.model_validate({"items": [{"id": "c1", "chapter": "1장", "section": None, "title": "시작", "estimated_minutes": 30}]})
 
+    async def extract_contents_images(self, images: list[tuple[bytes, str]]) -> ExtractedContents:
+        return await self.extract_contents(*images[0])
+
     async def generate_schedule(self, request, replan=None) -> Schedule:
         return Schedule.model_validate({
             "days": [{
@@ -45,9 +48,30 @@ def schedule_payload() -> dict:
 
 
 def test_extract_contents_returns_editable_items() -> None:
-    response = client.post("/contents/extract", files={"image": ("toc.png", b"image", "image/png")})
+    response = client.post("/contents/extract", files={"image": ("toc.png", b"\x89PNG\r\n\x1a\nimage", "image/png")})
     assert response.status_code == 200
     assert response.json()["items"][0]["title"] == "시작"
+
+
+def test_extract_accepts_jpeg_with_generic_multipart_type() -> None:
+    response = client.post("/contents/extract", files={"image": ("toc.jpg", b"\xff\xd8\xff\xe0image", "application/octet-stream")})
+    assert response.status_code == 200
+
+
+def test_extract_accepts_multiple_images_in_one_request() -> None:
+    response = client.post("/contents/extract", files=[
+        ("images", ("toc-1.jpg", b"\xff\xd8\xff\xe0first", "image/jpeg")),
+        ("images", ("toc-2.png", b"\x89PNG\r\n\x1a\nsecond", "image/png")),
+    ])
+    assert response.status_code == 200
+
+
+def test_extract_limits_image_count() -> None:
+    response = client.post("/contents/extract", files=[
+        ("images", (f"toc-{index}.jpg", b"\xff\xd8\xff\xe0image", "image/jpeg"))
+        for index in range(9)
+    ])
+    assert response.status_code == 400
 
 
 def test_extract_rejects_non_image() -> None:
@@ -64,6 +88,19 @@ def test_generate_schedule() -> None:
 def test_replan_accepts_completed_ids() -> None:
     payload = schedule_payload() | {"completed_content_ids": ["c1"]}
     response = client.post("/schedules/replan", json=payload)
+    assert response.status_code == 200
+
+
+def test_date_override_allows_a_different_daily_limit() -> None:
+    payload = schedule_payload()
+    payload["preferences"]["date_overrides"] = [{
+        "date": str(date.today()),
+        "available_minutes": 90,
+        "preferred_start_time": "08:30:00",
+        "focus_minutes": 40,
+        "break_minutes": 10,
+    }]
+    response = client.post("/schedules/generate", json=payload)
     assert response.status_code == 200
 
 
