@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -14,6 +15,7 @@ const _navy = Color(0xff1d2f6f);
 const _blue = Color(0xff4169e1);
 const _mint = Color(0xffd9f5ed);
 const _paper = Color(0xfff6f7fb);
+const _imageFileChannel = MethodChannel('com.example.ai_study_scheduler/image_file');
 
 void main() => runApp(const StudySchedulerApp());
 
@@ -93,6 +95,20 @@ class _StudyShellState extends State<StudyShell> {
     final image = await ImagePicker().pickImage(source: source, imageQuality: 88, maxWidth: 2400);
     if (image == null) return;
     await _extractFromFile(bookTitle, File(image.path));
+  }
+
+  Future<void> _pickFromFiles(String bookTitle) async {
+    if (bookTitle.trim().isEmpty) {
+      _message('먼저 책 제목을 입력해 주세요.');
+      return;
+    }
+    try {
+      final path = await _imageFileChannel.invokeMethod<String>('pickImage');
+      if (path == null) return;
+      await _extractFromFile(bookTitle, File(path));
+    } on PlatformException catch (error) {
+      _message(error.message ?? '파일을 열지 못했어요. 다시 시도해 주세요.');
+    }
   }
 
   Future<void> _extractFromFile(String bookTitle, File image) async {
@@ -190,6 +206,7 @@ class _StudyShellState extends State<StudyShell> {
             busy: _extracting,
             onCamera: (title) => _extract(title, ImageSource.camera),
             onGallery: (title) => _extract(title, ImageSource.gallery),
+            onFiles: _pickFromFiles,
             onManual: _startManual,
           ),
         _Stage.contents => ContentsScreen(
@@ -217,10 +234,11 @@ class _StudyShellState extends State<StudyShell> {
 }
 
 class WelcomeScreen extends StatefulWidget {
-  const WelcomeScreen({super.key, required this.busy, required this.onCamera, required this.onGallery, required this.onManual});
+  const WelcomeScreen({super.key, required this.busy, required this.onCamera, required this.onGallery, required this.onFiles, required this.onManual});
   final bool busy;
   final ValueChanged<String> onCamera;
   final ValueChanged<String> onGallery;
+  final ValueChanged<String> onFiles;
   final ValueChanged<String> onManual;
 
   @override
@@ -260,6 +278,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
             _ActionCard(icon: Icons.document_scanner_outlined, color: const Color(0xff7d5ce6), title: '목차 사진으로 시작', subtitle: 'AI가 장·절 목록을 읽어드려요', onTap: widget.busy ? null : () => widget.onCamera(_title.text)),
             const SizedBox(height: 10),
             _ActionCard(icon: Icons.photo_library_outlined, color: const Color(0xffe27644), title: '갤러리에서 사진 선택', subtitle: '이미 찍어둔 목차 사진을 사용해요', onTap: widget.busy ? null : () => widget.onGallery(_title.text)),
+            const SizedBox(height: 10),
+            _ActionCard(icon: Icons.folder_open_outlined, color: const Color(0xff466fd1), title: '파일에서 이미지 선택', subtitle: '다운로드 또는 파일 앱의 사진을 선택해요', onTap: widget.busy ? null : () => widget.onFiles(_title.text)),
             const SizedBox(height: 10),
             _ActionCard(icon: Icons.edit_note_outlined, color: const Color(0xff238b78), title: '직접 목차 입력', subtitle: '사진 없이 바로 항목을 추가할 수 있어요', onTap: widget.busy ? null : () => widget.onManual(_title.text)),
             if (widget.busy) const Padding(padding: EdgeInsets.only(top: 26), child: _LoadingMessage(label: '목차를 읽고 있어요…')),

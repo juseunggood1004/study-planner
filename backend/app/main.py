@@ -32,7 +32,7 @@ async def extract_contents(
     service: OpenAIService = Depends(get_service),
     settings: Settings = Depends(get_settings),
 ) -> ExtractedContents:
-    if image.content_type not in {"image/jpeg", "image/png", "image/webp"}:
+    if image.content_type not in {"image/jpeg", "image/jpg", "image/png", "image/webp"}:
         raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="JPG, PNG 또는 WEBP 이미지만 업로드할 수 있습니다.")
     image_bytes = await image.read()
     if not image_bytes:
