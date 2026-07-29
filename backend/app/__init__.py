@@ -1,0 +1,1 @@
+"""AI study scheduler backend."""

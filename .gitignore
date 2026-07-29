@@ -1,0 +1,24 @@
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+android/.gradle/
+ios/Pods/
+
+# Local uploads and editor files
+backend/uploads/
+.idea/
+.vscode/

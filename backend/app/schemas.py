@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from datetime import date, time
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+
+class ContentItem(BaseModel):
+    id: str = Field(min_length=1, max_length=100)
+    chapter: str = Field(min_length=1, max_length=200)
+    section: str | None = Field(default=None, max_length=200)
+    title: str = Field(min_length=1, max_length=300)
+    estimated_minutes: int | None = Field(default=None, ge=5, le=600)
+
+
+class DailyAvailability(BaseModel):
+    weekday: int = Field(ge=0, le=6, description="Monday is 0 and Sunday is 6")
+    available_minutes: int = Field(ge=0, le=1440)
+
+
+class StudyPreferences(BaseModel):
+    deadline: date
+    daily_availability: list[DailyAvailability] = Field(min_length=1, max_length=7)
+    preferred_start_time: time
+    focus_minutes: int = Field(ge=10, le=180)
+    break_minutes: int = Field(ge=0, le=60)
+    buffer_minutes: int = Field(default=15, ge=0, le=180)
+
+    @model_validator(mode="after")
+    def unique_weekdays(self) -> "StudyPreferences":
+        weekdays = [entry.weekday for entry in self.daily_availability]
+        if len(weekdays) != len(set(weekdays)):
+            raise ValueError("Each weekday may only appear once.")
+        return self
+
+
+class ScheduleRequest(BaseModel):
+    book_title: str = Field(min_length=1, max_length=200)
+    contents: list[ContentItem] = Field(min_length=1, max_length=500)
+    preferences: StudyPreferences
+
+
+class StudyBlock(BaseModel):
+    content_ids: list[str] = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=500)
+    start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    duration_minutes: int = Field(ge=5, le=600)
+    break_after_minutes: int = Field(default=0, ge=0, le=60)
+
+
+class ScheduleDay(BaseModel):
+    date: date
+    blocks: list[StudyBlock] = Field(default_factory=list)
+    review_minutes: int = Field(default=0, ge=0, le=300)
+    buffer_minutes: int = Field(default=0, ge=0, le=300)
+    note: str = Field(default="", max_length=500)
+
+
+class Schedule(BaseModel):
+    days: list[ScheduleDay] = Field(min_length=1)
+    summary: str = Field(min_length=1, max_length=1000)
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+
+class ReplanRequest(ScheduleRequest):
+    completed_content_ids: list[str] = Field(default_factory=list)
+    original_schedule: Schedule | None = None
+
+
+class ExtractedContents(BaseModel):
+    items: list[ContentItem] = Field(min_length=1, max_length=500)
+
+
+class ApiError(BaseModel):
+    detail: str
