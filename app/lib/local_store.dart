@@ -5,6 +5,7 @@ import 'models.dart';
 
 class LocalStore {
   static const _planKey = 'active_plan';
+  static const _plansKey = 'study_plans_v2';
   static const _installationKey = 'installation_id';
 
   Future<String> installationId() async {
@@ -16,19 +17,22 @@ class LocalStore {
     return created;
   }
 
-  Future<LocalPlan?> loadPlan() async {
+  Future<List<LocalPlan>> loadPlans() async {
     final prefs = await SharedPreferences.getInstance();
+    final plansSource = prefs.getString(_plansKey);
+    if (plansSource != null) return decodePlans(plansSource);
+
+    // One-time migration from the original single-book storage.
     final source = prefs.getString(_planKey);
-    return source == null ? null : decodePlan(source);
-  }
-
-  Future<void> savePlan(LocalPlan plan) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_planKey, encodePlan(plan));
-  }
-
-  Future<void> clearPlan() async {
-    final prefs = await SharedPreferences.getInstance();
+    if (source == null) return [];
+    final legacyPlan = decodePlan(source);
+    await prefs.setString(_plansKey, encodePlans([legacyPlan]));
     await prefs.remove(_planKey);
+    return [legacyPlan];
+  }
+
+  Future<void> savePlans(List<LocalPlan> plans) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_plansKey, encodePlans(plans));
   }
 }

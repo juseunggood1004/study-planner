@@ -19,6 +19,14 @@ class DailyAvailability(BaseModel):
     available_minutes: int = Field(ge=0, le=1440)
 
 
+class DateStudyOverride(BaseModel):
+    date: date
+    available_minutes: int = Field(ge=0, le=1440)
+    preferred_start_time: time
+    focus_minutes: int = Field(ge=10, le=180)
+    break_minutes: int = Field(ge=0, le=60)
+
+
 class StudyPreferences(BaseModel):
     deadline: date
     daily_availability: list[DailyAvailability] = Field(min_length=1, max_length=7)
@@ -26,17 +34,24 @@ class StudyPreferences(BaseModel):
     focus_minutes: int = Field(ge=10, le=180)
     break_minutes: int = Field(ge=0, le=60)
     buffer_minutes: int = Field(default=15, ge=0, le=180)
+    date_overrides: list[DateStudyOverride] = Field(default_factory=list, max_length=366)
 
     @model_validator(mode="after")
     def unique_weekdays(self) -> "StudyPreferences":
         weekdays = [entry.weekday for entry in self.daily_availability]
         if len(weekdays) != len(set(weekdays)):
             raise ValueError("Each weekday may only appear once.")
+        dates = [entry.date for entry in self.date_overrides]
+        if len(dates) != len(set(dates)):
+            raise ValueError("Each date may only have one override.")
+        if any(override.date > self.deadline for override in self.date_overrides):
+            raise ValueError("Date overrides cannot be after the deadline.")
         return self
 
 
 class ScheduleRequest(BaseModel):
     book_title: str = Field(min_length=1, max_length=200)
+    goal_type: Literal["book", "goal"] = "book"
     contents: list[ContentItem] = Field(min_length=1, max_length=500)
     preferences: StudyPreferences
 

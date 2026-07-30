@@ -19,7 +19,7 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
             .setMethodCallHandler { call, result ->
-                if (call.method != "pickImage") {
+                if (call.method != "pickImages" && call.method != "pickImage") {
                     result.notImplemented()
                 } else if (pendingResult != null) {
                     result.error("PICK_IN_PROGRESS", "이미 파일 선택 창이 열려 있어요.", null)
@@ -28,6 +28,7 @@ class MainActivity : FlutterActivity() {
                     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                         addCategory(Intent.CATEGORY_OPENABLE)
                         type = "image/*"
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, call.method == "pickImages")
                     }
                     startActivityForResult(intent, pickImageRequest)
                 }
@@ -41,14 +42,26 @@ class MainActivity : FlutterActivity() {
 
         val result = pendingResult ?: return
         pendingResult = null
-        val uri = data?.data
-        if (resultCode != Activity.RESULT_OK || uri == null) {
+        if (resultCode != Activity.RESULT_OK || data == null) {
             result.success(null)
             return
         }
 
         try {
-            result.success(copyToCache(uri).absolutePath)
+            val uris = mutableListOf<Uri>()
+            data.clipData?.let { clipData ->
+                for (index in 0 until clipData.itemCount) {
+                    uris.add(clipData.getItemAt(index).uri)
+                }
+            }
+            data.data?.let { uri ->
+                if (!uris.contains(uri)) uris.add(uri)
+            }
+            if (uris.isEmpty()) {
+                result.success(null)
+            } else {
+                result.success(uris.map { uri -> copyToCache(uri).absolutePath })
+            }
         } catch (error: Exception) {
             result.error("FILE_READ_ERROR", "선택한 이미지를 읽지 못했어요.", error.message)
         }

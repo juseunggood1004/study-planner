@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+backend/venv/
 
 # Flutter / Dart
 .dart_tool/
@@ -22,3 +23,4 @@ ios/Pods/
 backend/uploads/
 .idea/
 .vscode/
+.DS_Store

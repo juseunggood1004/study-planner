@@ -1,6 +1,6 @@
-# ai_study_scheduler
+# 하루공부 Flutter 앱
 
-A new Flutter project.
+홈에서 책 또는 자유 목표 계획을 추가하고, 날짜별 학습 리듬을 조정할 수 있는 Flutter 클라이언트입니다.
 
 ## Getting Started
 
