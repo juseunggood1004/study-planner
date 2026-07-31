@@ -8,7 +8,8 @@ plugins {
 android {
     namespace = "com.example.ai_study_scheduler"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = "27.0.12077973"
+    // NDK 27 설치가 손상되어, 설치가 확인된 NDK 28.2를 사용합니다.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

@@ -3,8 +3,8 @@ import 'dart:convert';
 enum PlanKind { book, goal }
 
 extension PlanKindLabel on PlanKind {
-  String get label => this == PlanKind.book ? '책' : '자유 목표';
-  String get itemLabel => this == PlanKind.book ? '목차' : '학습 단계';
+  String get label => this == PlanKind.book ? '책' : '과목 계획';
+  String get itemLabel => this == PlanKind.book ? '목차' : '과목·단원';
 }
 
 class ContentItem {
@@ -65,10 +65,12 @@ class DateStudyOverride {
   final int focusMinutes;
   final int breakMinutes;
 
-  factory DateStudyOverride.fromJson(Map<String, dynamic> json) => DateStudyOverride(
+  factory DateStudyOverride.fromJson(Map<String, dynamic> json) =>
+      DateStudyOverride(
         date: DateTime.parse(json['date'] as String),
         availableMinutes: json['available_minutes'] as int,
-        preferredStartTime: (json['preferred_start_time'] as String).substring(0, 5),
+        preferredStartTime:
+            (json['preferred_start_time'] as String).substring(0, 5),
         focusMinutes: json['focus_minutes'] as int,
         breakMinutes: json['break_minutes'] as int,
       );
@@ -82,8 +84,62 @@ class DateStudyOverride {
       };
 }
 
+class BlockedTime {
+  const BlockedTime({
+    required this.label,
+    required this.weekday,
+    required this.startTime,
+    required this.endTime,
+  });
+
+  final String label;
+  final int weekday;
+  final String startTime;
+  final String endTime;
+
+  factory BlockedTime.fromJson(Map<String, dynamic> json) => BlockedTime(
+        label: json['label'] as String,
+        weekday: json['weekday'] as int,
+        startTime: (json['start_time'] as String).substring(0, 5),
+        endTime: (json['end_time'] as String).substring(0, 5),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'label': label,
+        'weekday': weekday,
+        'start_time': '$startTime:00',
+        'end_time': '$endTime:00',
+      };
+}
+
+class LearningFeedback {
+  const LearningFeedback({
+    required this.date,
+    required this.fatigue,
+    required this.difficulty,
+  });
+
+  final DateTime date;
+  final int fatigue;
+  final int difficulty;
+
+  factory LearningFeedback.fromJson(Map<String, dynamic> json) =>
+      LearningFeedback(
+        date: DateTime.parse(json['date'] as String),
+        fatigue: json['fatigue'] as int,
+        difficulty: json['difficulty'] as int,
+      );
+
+  Map<String, dynamic> toJson() => {
+        'date': _dateOnly(date),
+        'fatigue': fatigue,
+        'difficulty': difficulty,
+      };
+}
+
 class StudyPreferences {
   StudyPreferences({
+    required this.startDate,
     required this.deadline,
     required this.dailyAvailability,
     required this.preferredStartTime,
@@ -91,8 +147,11 @@ class StudyPreferences {
     required this.breakMinutes,
     required this.bufferMinutes,
     Map<String, DateStudyOverride>? dateOverrides,
-  }) : dateOverrides = dateOverrides ?? {};
+    List<BlockedTime>? blockedTimes,
+  })  : dateOverrides = dateOverrides ?? {},
+        blockedTimes = blockedTimes ?? const [];
 
+  final DateTime startDate;
   final DateTime deadline;
   final Map<int, int> dailyAvailability;
   final String preferredStartTime;
@@ -100,10 +159,13 @@ class StudyPreferences {
   final int breakMinutes;
   final int bufferMinutes;
   final Map<String, DateStudyOverride> dateOverrides;
+  final List<BlockedTime> blockedTimes;
 
-  DateStudyOverride? overrideFor(DateTime date) => dateOverrides[_dateOnly(date)];
+  DateStudyOverride? overrideFor(DateTime date) =>
+      dateOverrides[_dateOnly(date)];
 
   Map<String, dynamic> toJson() => {
+        'start_date': _dateOnly(startDate),
         'deadline': _dateOnly(deadline),
         'daily_availability': dailyAvailability.entries
             .map((entry) => DailyAvailability(entry.key, entry.value).toJson())
@@ -112,26 +174,45 @@ class StudyPreferences {
         'focus_minutes': focusMinutes,
         'break_minutes': breakMinutes,
         'buffer_minutes': bufferMinutes,
-        'date_overrides': dateOverrides.values.map((value) => value.toJson()).toList(),
+        'date_overrides':
+            dateOverrides.values.map((value) => value.toJson()).toList(),
+        'blocked_times': blockedTimes.map((value) => value.toJson()).toList(),
       };
 
-  factory StudyPreferences.fromJson(Map<String, dynamic> json) {
+  factory StudyPreferences.fromJson(
+    Map<String, dynamic> json, {
+    DateTime? legacyStartDate,
+  }) {
     final availability = <int, int>{
       for (final item in json['daily_availability'] as List)
-        (item as Map<String, dynamic>)['weekday'] as int: item['available_minutes'] as int,
+        (item as Map<String, dynamic>)['weekday'] as int:
+            item['available_minutes'] as int,
     };
-    final overrides = (json['date_overrides'] as List? ?? const [])
-        .map((item) => DateStudyOverride.fromJson(item as Map<String, dynamic>));
+    final overrides = (json['date_overrides'] as List? ?? const []).map(
+        (item) => DateStudyOverride.fromJson(item as Map<String, dynamic>));
+    final blockedTimes = (json['blocked_times'] as List? ?? const [])
+        .map((item) => BlockedTime.fromJson(item as Map<String, dynamic>))
+        .toList();
     return StudyPreferences(
+      // Plans created before start-date support reuse their first planned day.
+      // This keeps re-planning old locally stored plans within their original range.
+      startDate: DateTime.parse(
+        (json['start_date'] ??
+            (legacyStartDate == null
+                ? json['deadline']
+                : _dateOnly(legacyStartDate))) as String,
+      ),
       deadline: DateTime.parse(json['deadline'] as String),
       dailyAvailability: availability,
-      preferredStartTime: (json['preferred_start_time'] as String).substring(0, 5),
+      preferredStartTime:
+          (json['preferred_start_time'] as String).substring(0, 5),
       focusMinutes: json['focus_minutes'] as int,
       breakMinutes: json['break_minutes'] as int,
       bufferMinutes: json['buffer_minutes'] as int,
       dateOverrides: {
         for (final override in overrides) _dateOnly(override.date): override,
       },
+      blockedTimes: blockedTimes,
     );
   }
 }
@@ -233,7 +314,10 @@ class LocalPlan {
     required this.preferences,
     required this.schedule,
     required this.completedIds,
-  });
+    Map<String, bool>? dailyCheckIns,
+    Map<String, LearningFeedback>? learningFeedback,
+  })  : dailyCheckIns = dailyCheckIns ?? {},
+        learningFeedback = learningFeedback ?? {};
 
   final String planId;
   final String installationId;
@@ -243,6 +327,8 @@ class LocalPlan {
   final StudyPreferences preferences;
   Schedule schedule;
   final Set<String> completedIds;
+  final Map<String, bool> dailyCheckIns;
+  final Map<String, LearningFeedback> learningFeedback;
 
   Map<String, dynamic> toRequestJson() => {
         // book_title is kept as a wire-compatible field while the product supports
@@ -251,6 +337,8 @@ class LocalPlan {
         'goal_type': kind.name,
         'contents': contents.map((item) => item.toJson()).toList(),
         'preferences': preferences.toJson(),
+        'learning_feedback':
+            learningFeedback.values.map((value) => value.toJson()).toList(),
       };
 
   Map<String, dynamic> toJson() => {
@@ -260,6 +348,9 @@ class LocalPlan {
         'installation_id': installationId,
         'schedule': schedule.toJson(),
         'completed_ids': completedIds.toList(),
+        'daily_check_ins': dailyCheckIns,
+        'learning_feedback':
+            learningFeedback.values.map((value) => value.toJson()).toList(),
       };
 
   factory LocalPlan.fromJson(Map<String, dynamic> json) => LocalPlan(
@@ -273,13 +364,35 @@ class LocalPlan {
         contents: (json['contents'] as List)
             .map((item) => ContentItem.fromJson(item as Map<String, dynamic>))
             .toList(),
-        preferences: StudyPreferences.fromJson(json['preferences'] as Map<String, dynamic>),
+        preferences: StudyPreferences.fromJson(
+          json['preferences'] as Map<String, dynamic>,
+          legacyStartDate:
+              _firstScheduleDate(json['schedule'] as Map<String, dynamic>),
+        ),
         schedule: Schedule.fromJson(json['schedule'] as Map<String, dynamic>),
         completedIds: Set<String>.from(json['completed_ids'] as List),
+        dailyCheckIns:
+            (json['daily_check_ins'] as Map<String, dynamic>? ?? const {})
+                .map((key, value) => MapEntry(key, value as bool)),
+        learningFeedback: {
+          for (final feedback
+              in (json['learning_feedback'] as List? ?? const []).map((item) =>
+                  LearningFeedback.fromJson(item as Map<String, dynamic>)))
+            _dateOnly(feedback.date): feedback,
+        },
       );
 }
 
 String _dateOnly(DateTime value) => value.toIso8601String().substring(0, 10);
+
+DateTime? _firstScheduleDate(Map<String, dynamic> schedule) {
+  final dates = (schedule['days'] as List? ?? const [])
+      .map((day) =>
+          DateTime.parse((day as Map<String, dynamic>)['date'] as String))
+      .toList()
+    ..sort();
+  return dates.isEmpty ? null : dates.first;
+}
 
 String encodePlan(LocalPlan plan) => jsonEncode(plan.toJson());
 LocalPlan decodePlan(String source) =>

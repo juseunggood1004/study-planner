@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +10,7 @@ from .openai_service import OpenAIService, OpenAIServiceError
 from .schemas import ExtractedContents, ReplanRequest, Schedule, ScheduleRequest
 
 app = FastAPI(title="AI Study Scheduler API", version="0.1.0")
+logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Restrict this to deployed app origins when a web client is added.
@@ -72,6 +75,7 @@ async def generate_schedule(request: ScheduleRequest, service: OpenAIService = D
     try:
         return await service.generate_schedule(request)
     except OpenAIServiceError as exc:
+        logger.warning("Schedule generation failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
@@ -80,4 +84,5 @@ async def replan_schedule(request: ReplanRequest, service: OpenAIService = Depen
     try:
         return await service.generate_schedule(request, replan=request)
     except OpenAIServiceError as exc:
+        logger.warning("Schedule replanning failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc

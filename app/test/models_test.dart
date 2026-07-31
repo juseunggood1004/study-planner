@@ -52,10 +52,13 @@ void main() {
     expect(plan.title, '기존 책');
     expect(plan.kind, PlanKind.book);
     expect(plan.preferences.dateOverrides, isEmpty);
+    expect(plan.learningFeedback, isEmpty);
+    expect(plan.preferences.startDate, DateTime(2030, 1, 1));
   });
 
   test('date-specific rhythm is included in a goal request', () {
     final preferences = StudyPreferences(
+      startDate: DateTime(2030, 1, 1),
       deadline: DateTime(2030, 1, 2),
       dailyAvailability: {0: 60},
       preferredStartTime: '19:00',
@@ -71,10 +74,21 @@ void main() {
           breakMinutes: 5,
         ),
       },
+      blockedTimes: const [
+        BlockedTime(
+          label: '수학 학원',
+          weekday: 0,
+          startTime: '19:00',
+          endTime: '21:00',
+        ),
+      ],
     );
     final request = preferences.toJson();
 
+    expect(request['start_date'], '2030-01-01');
+    expect((request['blocked_times'] as List).single['end_time'], '21:00:00');
     expect((request['date_overrides'] as List).single['available_minutes'], 90);
-    expect((request['date_overrides'] as List).single['preferred_start_time'], '08:30:00');
+    expect((request['date_overrides'] as List).single['preferred_start_time'],
+        '08:30:00');
   });
 }

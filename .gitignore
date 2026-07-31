@@ -21,6 +21,7 @@ ios/Pods/
 
 # Local uploads and editor files
 backend/uploads/
+backend/server*.log
 .idea/
 .vscode/
 .DS_Store

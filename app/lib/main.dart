@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -214,10 +215,13 @@ class _StudyShellState extends State<StudyShell> {
   }
 
   void _startManual(PlanKind kind, String title) {
-    if (!_validTitle(title)) return;
+    final planTitle = title.trim().isEmpty && kind == PlanKind.goal
+        ? '나의 과목 계획'
+        : title.trim();
+    if (!_validTitle(planTitle)) return;
     setState(() {
       _draftKind = kind;
-      _draftTitle = title.trim();
+      _draftTitle = planTitle;
       _draftContents = [];
       _stage = _Stage.contents;
     });
@@ -287,6 +291,44 @@ class _StudyShellState extends State<StudyShell> {
       setState(() => plan.schedule = schedule);
       await _store.savePlans(_plans);
     } catch (error) {
+      _message(_friendlyError(error));
+      rethrow;
+    }
+  }
+
+  Future<void> _confirmDailyProgress(
+    ScheduleDay day,
+    bool completed,
+    LearningFeedback? feedback,
+  ) async {
+    final plan = _selectedPlan;
+    if (plan == null) return;
+    final key = _dateOnly(day.date);
+    final previous = plan.dailyCheckIns[key];
+    plan.dailyCheckIns[key] = completed;
+
+    if (completed) {
+      if (feedback != null) plan.learningFeedback[key] = feedback;
+      for (final block in day.blocks) {
+        plan.completedIds.addAll(block.contentIds);
+      }
+      await _store.savePlans(_plans);
+      _message('오늘 학습을 완료로 기록했어요.');
+      return;
+    }
+
+    try {
+      final schedule = await _api.replan(plan);
+      if (!mounted) return;
+      setState(() => plan.schedule = schedule);
+      await _store.savePlans(_plans);
+      _message('미완료 분량을 남은 날짜에 맞춰 다시 배정했어요.');
+    } catch (error) {
+      if (previous == null) {
+        plan.dailyCheckIns.remove(key);
+      } else {
+        plan.dailyCheckIns[key] = previous;
+      }
       _message(_friendlyError(error));
       rethrow;
     }
@@ -386,6 +428,7 @@ class _StudyShellState extends State<StudyShell> {
           ),
         _Stage.preferences => PreferencesScreen(
             key: const ValueKey('preferences'),
+            kind: _draftKind,
             onBack: () => setState(() => _stage = _Stage.contents),
             onGenerate: _createPlan,
           ),
@@ -397,6 +440,7 @@ class _StudyShellState extends State<StudyShell> {
             onDelete: _deleteSelectedPlan,
             onToggle: _toggleCompleted,
             onReplan: _replan,
+            onConfirmDailyProgress: _confirmDailyProgress,
             onUpdateDay: _updateDay,
           ),
       },
@@ -593,8 +637,8 @@ class _PlanSetupScreenState extends State<PlanSetupScreen> {
                   Expanded(
                     child: _KindCard(
                       icon: Icons.flag_rounded,
-                      title: '자유 목표',
-                      subtitle: '단계를 직접 구성',
+                      title: '과목 · 단원',
+                      subtitle: '하루 계획표 만들기',
                       selected: _kind == PlanKind.goal,
                       onTap: () => setState(() => _kind = PlanKind.goal),
                     ),
@@ -606,15 +650,17 @@ class _PlanSetupScreenState extends State<PlanSetupScreen> {
                 controller: _title,
                 textInputAction: TextInputAction.done,
                 decoration: InputDecoration(
-                  labelText: _kind == PlanKind.book ? '책 제목' : '목표 이름',
+                  labelText: _kind == PlanKind.book ? '책 제목' : '계획 이름 · 선택',
                   hintText: _kind == PlanKind.book
                       ? '예: 해커스 토익 리딩'
-                      : '예: 8월까지 포트폴리오 완성',
+                      : '비워두면 나의 과목 계획으로 만들어요',
                 ),
               ),
               const SizedBox(height: 26),
               Text(
-                _kind == PlanKind.book ? '목차를 어떻게 가져올까요?' : '학습 단계를 만들어 볼까요?',
+                _kind == PlanKind.book
+                    ? '목차를 어떻게 가져올까요?'
+                    : '공부할 과목과 단원을 입력해 주세요',
                 style:
                     const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
               ),
@@ -656,12 +702,12 @@ class _PlanSetupScreenState extends State<PlanSetupScreen> {
               _ActionCard(
                 icon: _kind == PlanKind.book
                     ? Icons.edit_note_rounded
-                    : Icons.account_tree_rounded,
+                    : Icons.today_rounded,
                 color: const Color(0xff74558f),
-                title: _kind == PlanKind.book ? '목차 직접 입력' : '학습 단계 직접 만들기',
+                title: _kind == PlanKind.book ? '목차 직접 입력' : '과목 · 단원 입력',
                 subtitle: _kind == PlanKind.book
                     ? '사진 없이 장·절을 추가해요'
-                    : '목표를 작은 실행 단계로 나눠요',
+                    : '입력한 과목과 단원으로 오늘 계획을 만들어요',
                 onTap: widget.busy
                     ? null
                     : () => widget.onManual(_kind, _title.text),
@@ -1025,10 +1071,12 @@ class _DragHandle extends StatelessWidget {
 class PreferencesScreen extends StatefulWidget {
   const PreferencesScreen({
     super.key,
+    required this.kind,
     required this.onBack,
     required this.onGenerate,
   });
 
+  final PlanKind kind;
   final VoidCallback onBack;
   final Future<void> Function(StudyPreferences) onGenerate;
 
@@ -1036,7 +1084,152 @@ class PreferencesScreen extends StatefulWidget {
   State<PreferencesScreen> createState() => _PreferencesScreenState();
 }
 
+class BlockedTimeSheet extends StatefulWidget {
+  const BlockedTimeSheet({super.key});
+
+  @override
+  State<BlockedTimeSheet> createState() => _BlockedTimeSheetState();
+}
+
+class _BlockedTimeSheetState extends State<BlockedTimeSheet> {
+  final _label = TextEditingController(text: '학교');
+  int _weekday = DateTime.now().weekday - 1;
+  TimeOfDay _start = const TimeOfDay(hour: 9, minute: 0);
+  TimeOfDay _end = const TimeOfDay(hour: 16, minute: 0);
+  static const _days = ['월', '화', '수', '목', '금', '토', '일'];
+
+  @override
+  void dispose() {
+    _label.dispose();
+    super.dispose();
+  }
+
+  int _minutes(TimeOfDay value) => value.hour * 60 + value.minute;
+
+  void _save() {
+    if (_label.text.trim().isEmpty || _minutes(_end) <= _minutes(_start)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('이름과 올바른 시작·종료 시간을 입력해 주세요.')),
+      );
+      return;
+    }
+    Navigator.pop(
+      context,
+      BlockedTime(
+        label: _label.text.trim(),
+        weekday: _weekday,
+        startTime: _timeValue(_start),
+        endTime: _timeValue(_end),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+        child: Container(
+          padding: EdgeInsets.fromLTRB(
+            20,
+            18,
+            20,
+            20 + MediaQuery.viewInsetsOf(context).bottom,
+          ),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+          ),
+          child: Wrap(
+            runSpacing: 16,
+            children: [
+              const Text('학교 · 학원 일정 추가',
+                  style: TextStyle(fontSize: 21, fontWeight: FontWeight.w900)),
+              TextField(
+                controller: _label,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: '일정 이름',
+                  hintText: '예: 학교, 수학 학원',
+                ),
+              ),
+              DropdownButtonFormField<int>(
+                value: _weekday,
+                decoration: const InputDecoration(labelText: '요일'),
+                items: List.generate(
+                  7,
+                  (index) => DropdownMenuItem(
+                    value: index,
+                    child: Text('${_days[index]}요일'),
+                  ),
+                ),
+                onChanged: (value) => setState(() => _weekday = value!),
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: _TimeInput(
+                      label: '시작',
+                      value: _start,
+                      onTap: () async {
+                        final next = await showTimePicker(
+                          context: context,
+                          initialTime: _start,
+                        );
+                        if (next != null) setState(() => _start = next);
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: _TimeInput(
+                      label: '종료',
+                      value: _end,
+                      onTap: () async {
+                        final next = await showTimePicker(
+                          context: context,
+                          initialTime: _end,
+                        );
+                        if (next != null) setState(() => _end = next);
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  onPressed: _save,
+                  child: const Text('일정 추가'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
+class _TimeInput extends StatelessWidget {
+  const _TimeInput({
+    required this.label,
+    required this.value,
+    required this.onTap,
+  });
+
+  final String label;
+  final TimeOfDay value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: InputDecorator(
+          decoration: InputDecoration(labelText: label),
+          child: Text(value.format(context)),
+        ),
+      );
+}
+
 class _PreferencesScreenState extends State<PreferencesScreen> {
+  DateTime _startDate = DateUtils.dateOnly(DateTime.now());
   DateTime _deadline = DateTime.now().add(const Duration(days: 30));
   TimeOfDay _start = const TimeOfDay(hour: 19, minute: 0);
   final Map<int, int> _minutes = {
@@ -1052,8 +1245,27 @@ class _PreferencesScreenState extends State<PreferencesScreen> {
   int _focus = 40;
   int _break = 10;
   int _buffer = 20;
+  final List<BlockedTime> _blockedTimes = [];
   bool _busy = false;
   static const _days = ['월', '화', '수', '목', '금', '토', '일'];
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.kind == PlanKind.goal) _deadline = _startDate;
+  }
+
+  Future<void> _addBlockedTime() async {
+    final blocked = await showModalBottomSheet<BlockedTime>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const BlockedTimeSheet(),
+    );
+    if (blocked != null && mounted) {
+      setState(() => _blockedTimes.add(blocked));
+    }
+  }
 
   Future<void> _submit() async {
     final availability = <int, int>{
@@ -1062,12 +1274,14 @@ class _PreferencesScreenState extends State<PreferencesScreen> {
     };
     if (availability.isEmpty) return;
     final preferences = StudyPreferences(
+      startDate: _startDate,
       deadline: _deadline,
       dailyAvailability: availability,
       preferredStartTime: _timeValue(_start),
       focusMinutes: _focus,
       breakMinutes: _break,
       bufferMinutes: _buffer,
+      blockedTimes: _blockedTimes,
     );
     setState(() => _busy = true);
     try {
@@ -1110,20 +1324,46 @@ class _PreferencesScreenState extends State<PreferencesScreen> {
               _PreferenceCard(
                 children: [
                   _SettingsRow(
-                    icon: Icons.event_rounded,
-                    title: '마감일',
-                    value: DateFormat('M월 d일 (E)', 'ko_KR').format(_deadline),
+                    icon: Icons.play_circle_outline_rounded,
+                    title: '학습 시작일',
+                    value: DateFormat('M월 d일 (E)', 'ko_KR').format(_startDate),
                     onTap: () async {
                       final next = await showDatePicker(
                         context: context,
-                        initialDate: _deadline,
-                        firstDate: DateTime.now(),
-                        lastDate: DateTime.now().add(const Duration(days: 730)),
+                        initialDate: _startDate,
+                        firstDate: DateUtils.dateOnly(DateTime.now()),
+                        lastDate: widget.kind == PlanKind.goal
+                            ? DateTime.now().add(const Duration(days: 730))
+                            : _deadline,
                         locale: const Locale('ko'),
                       );
-                      if (next != null) setState(() => _deadline = next);
+                      if (next != null) {
+                        setState(() {
+                          _startDate = next;
+                          if (widget.kind == PlanKind.goal) _deadline = next;
+                        });
+                      }
                     },
                   ),
+                  if (widget.kind != PlanKind.goal) ...[
+                    const Divider(height: 28, color: _line),
+                    _SettingsRow(
+                      icon: Icons.event_rounded,
+                      title: '마감일',
+                      value: DateFormat('M월 d일 (E)', 'ko_KR').format(_deadline),
+                      onTap: () async {
+                        final next = await showDatePicker(
+                          context: context,
+                          initialDate: _deadline,
+                          firstDate: _startDate,
+                          lastDate:
+                              DateTime.now().add(const Duration(days: 730)),
+                          locale: const Locale('ko'),
+                        );
+                        if (next != null) setState(() => _deadline = next);
+                      },
+                    ),
+                  ],
                   const Divider(height: 28, color: _line),
                   _SettingsRow(
                     icon: Icons.schedule_rounded,
@@ -1136,6 +1376,51 @@ class _PreferencesScreenState extends State<PreferencesScreen> {
                       );
                       if (next != null) setState(() => _start = next);
                     },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              const _FieldTitle(
+                title: '학교 · 학원 일정',
+                subtitle: '이 시간에는 학습 블록을 만들지 않아요.',
+              ),
+              const SizedBox(height: 10),
+              _PreferenceCard(
+                children: [
+                  if (_blockedTimes.isEmpty)
+                    const Text(
+                      '등록한 고정 일정이 없어요. 학교나 학원 시간을 추가해 보세요.',
+                      style: TextStyle(color: _muted, height: 1.45),
+                    )
+                  else
+                    ..._blockedTimes.asMap().entries.map(
+                          (entry) => Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              dense: true,
+                              leading: const Icon(Icons.event_busy_rounded,
+                                  color: _green),
+                              title: Text(entry.value.label,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.w800)),
+                              subtitle: Text(
+                                '${_days[entry.value.weekday]}요일 · ${entry.value.startTime}–${entry.value.endTime}',
+                              ),
+                              trailing: IconButton(
+                                tooltip: '일정 삭제',
+                                onPressed: () => setState(
+                                  () => _blockedTimes.removeAt(entry.key),
+                                ),
+                                icon: const Icon(Icons.close_rounded),
+                              ),
+                            ),
+                          ),
+                        ),
+                  OutlinedButton.icon(
+                    onPressed: _addBlockedTime,
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('학교 · 학원 일정 추가'),
                   ),
                 ],
               ),
@@ -1241,6 +1526,7 @@ class PlanScreen extends StatefulWidget {
     required this.onDelete,
     required this.onToggle,
     required this.onReplan,
+    required this.onConfirmDailyProgress,
     required this.onUpdateDay,
   });
 
@@ -1250,6 +1536,8 @@ class PlanScreen extends StatefulWidget {
   final Future<void> Function() onDelete;
   final Future<void> Function(String, bool) onToggle;
   final Future<void> Function() onReplan;
+  final Future<void> Function(ScheduleDay, bool, LearningFeedback?)
+      onConfirmDailyProgress;
   final Future<void> Function(DateStudyOverride) onUpdateDay;
 
   @override
@@ -1259,6 +1547,124 @@ class PlanScreen extends StatefulWidget {
 class _PlanScreenState extends State<PlanScreen> {
   bool _replanning = false;
   String? _adjustingDate;
+  String? _checkingDate;
+  bool _automaticCheckInShown = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _askForMissedDay());
+  }
+
+  ScheduleDay? _unconfirmedPastDay() {
+    final today = DateUtils.dateOnly(DateTime.now());
+    return widget.plan.schedule.days
+        .where(
+          (day) =>
+              day.blocks.isNotEmpty &&
+              day.date.isBefore(today) &&
+              !widget.plan.dailyCheckIns.containsKey(_dateOnly(day.date)),
+        )
+        .firstOrNull;
+  }
+
+  Future<void> _askForMissedDay() async {
+    if (!mounted || _automaticCheckInShown) return;
+    final day = _unconfirmedPastDay();
+    if (day == null) return;
+    _automaticCheckInShown = true;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('어제 학습을 마쳤나요?'),
+        content: Text(
+          '${DateFormat('M월 d일', 'ko_KR').format(day.date)}에 계획한 학습을 모두 완료했는지 알려주세요. 미완료라면 남은 날짜에 맞춰 일정을 다시 배정합니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('미완료, 일정 조정'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('완료했어요'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && mounted) await _confirmDay(day, result);
+  }
+
+  Future<void> _confirmDay(ScheduleDay day, bool completed) async {
+    final feedback = completed ? await _collectFeedback(day) : null;
+    if (completed && feedback == null) return;
+    setState(() => _checkingDate = _dateOnly(day.date));
+    try {
+      await widget.onConfirmDailyProgress(day, completed, feedback);
+    } catch (_) {
+      // The parent presents a localized error.
+    } finally {
+      if (mounted) setState(() => _checkingDate = null);
+    }
+  }
+
+  Future<LearningFeedback?> _collectFeedback(ScheduleDay day) async {
+    var fatigue = 3;
+    var difficulty = 3;
+    return showDialog<LearningFeedback>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('오늘 학습은 어땠나요?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('다음 계획의 학습량과 휴식에 반영할게요.'),
+              const SizedBox(height: 16),
+              _FeedbackRating(
+                label: '피로도',
+                value: fatigue,
+                lowLabel: '여유로움',
+                highLabel: '매우 피곤',
+                onChanged: (value) => setDialogState(() => fatigue = value),
+              ),
+              const SizedBox(height: 12),
+              _FeedbackRating(
+                label: '체감 난이도',
+                value: difficulty,
+                lowLabel: '쉬웠음',
+                highLabel: '매우 어려움',
+                onChanged: (value) => setDialogState(() => difficulty = value),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('나중에'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                context,
+                LearningFeedback(
+                  date: day.date,
+                  fatigue: fatigue,
+                  difficulty: difficulty,
+                ),
+              ),
+              child: const Text('다음 계획에 반영'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _completeTimerBlock(StudyBlock block) async {
+    for (final id in block.contentIds) {
+      await widget.onToggle(id, true);
+    }
+  }
 
   Future<void> _runReplan() async {
     setState(() => _replanning = true);
@@ -1331,6 +1737,13 @@ class _PlanScreenState extends State<PlanScreen> {
             )) &&
             day.blocks.isNotEmpty)
         .firstOrNull;
+    final today = DateUtils.dateOnly(DateTime.now());
+    final todayDay = widget.plan.schedule.days
+        .where((day) => _sameDay(day.date, today) && day.blocks.isNotEmpty)
+        .firstOrNull;
+    final todayCheckIn = todayDay == null
+        ? null
+        : widget.plan.dailyCheckIns[_dateOnly(todayDay.date)];
 
     return Scaffold(
       appBar: AppBar(
@@ -1461,6 +1874,21 @@ class _PlanScreenState extends State<PlanScreen> {
               ...widget.plan.schedule.warnings
                   .map((warning) => _Notice(text: warning)),
             ],
+            if (todayDay != null) ...[
+              const SizedBox(height: 18),
+              _DailyCheckInCard(
+                day: todayDay,
+                status: todayCheckIn,
+                loading: _checkingDate == _dateOnly(todayDay.date),
+                onDone: () => _confirmDay(todayDay, true),
+                onMissed: () => _confirmDay(todayDay, false),
+              ),
+              const SizedBox(height: 14),
+              _StudyTimerCard(
+                blocks: todayDay.blocks,
+                onCompleteBlock: _completeTimerBlock,
+              ),
+            ],
             const SizedBox(height: 14),
             OutlinedButton.icon(
               onPressed: _replanning ? null : _runReplan,
@@ -1487,6 +1915,7 @@ class _PlanScreenState extends State<PlanScreen> {
               (day) => _ScheduleDayCard(
                 day: day,
                 completed: widget.plan.completedIds,
+                dailyCheckIn: widget.plan.dailyCheckIns[_dateOnly(day.date)],
                 adjusting: _adjustingDate == _dateOnly(day.date),
                 onEdit: () => _editDay(day),
                 onToggle: widget.onToggle,
@@ -1494,6 +1923,416 @@ class _PlanScreenState extends State<PlanScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _FeedbackRating extends StatelessWidget {
+  const _FeedbackRating({
+    required this.label,
+    required this.value,
+    required this.lowLabel,
+    required this.highLabel,
+    required this.onChanged,
+  });
+
+  final String label;
+  final int value;
+  final String lowLabel;
+  final String highLabel;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(label, style: const TextStyle(fontWeight: FontWeight.w800)),
+              const Spacer(),
+              Text('$value / 5', style: const TextStyle(color: _green)),
+            ],
+          ),
+          Slider(
+            value: value.toDouble(),
+            min: 1,
+            max: 5,
+            divisions: 4,
+            label: '$value',
+            activeColor: _green,
+            onChanged: (next) => onChanged(next.round()),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(lowLabel,
+                  style: const TextStyle(color: _muted, fontSize: 12)),
+              Text(highLabel,
+                  style: const TextStyle(color: _muted, fontSize: 12)),
+            ],
+          ),
+        ],
+      );
+}
+
+class _DailyCheckInCard extends StatelessWidget {
+  const _DailyCheckInCard({
+    required this.day,
+    required this.status,
+    required this.loading,
+    required this.onDone,
+    required this.onMissed,
+  });
+
+  final ScheduleDay day;
+  final bool? status;
+  final bool loading;
+  final VoidCallback onDone;
+  final VoidCallback onMissed;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: status == true ? const Color(0xffe7f3e8) : Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+              color: status == true ? const Color(0xffb9d8bf) : _line),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: _sage,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child:
+                      const Icon(Icons.fact_check_rounded, color: _greenDark),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Text(
+                    '${DateFormat('M월 d일', 'ko_KR').format(day.date)} 학습 확인',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w900, fontSize: 16),
+                  ),
+                ),
+                if (loading)
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: _green),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (status == true)
+              const Text('완료로 기록됐어요. 다음 학습도 이어가 볼까요?',
+                  style: TextStyle(color: _muted))
+            else if (status == false)
+              const Text('미완료 분량을 남은 학습일에 맞춰 다시 배정했어요.',
+                  style: TextStyle(color: _muted))
+            else ...[
+              const Text('오늘 계획한 학습을 모두 마쳤나요?',
+                  style: TextStyle(color: _muted)),
+              const SizedBox(height: 13),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: loading ? null : onMissed,
+                      child: const Text('미완료, 일정 조정'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: loading ? null : onDone,
+                      child: const Text('완료했어요'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      );
+}
+
+class _StudyTimerCard extends StatefulWidget {
+  const _StudyTimerCard({
+    required this.blocks,
+    required this.onCompleteBlock,
+  });
+
+  final List<StudyBlock> blocks;
+  final Future<void> Function(StudyBlock block) onCompleteBlock;
+
+  @override
+  State<_StudyTimerCard> createState() => _StudyTimerCardState();
+}
+
+class _StudyTimerCardState extends State<_StudyTimerCard> {
+  Timer? _ticker;
+  int _blockIndex = 0;
+  int _remainingSeconds = 0;
+  int _totalSeconds = 1;
+  bool _running = false;
+  bool _isBreak = false;
+  bool _workFinished = false;
+  bool _savingCompletion = false;
+
+  StudyBlock get _block =>
+      widget.blocks[_blockIndex.clamp(0, widget.blocks.length - 1)];
+
+  @override
+  void initState() {
+    super.initState();
+    _resetTimer();
+  }
+
+  @override
+  void didUpdateWidget(covariant _StudyTimerCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_blockIndex >= widget.blocks.length) {
+      _blockIndex = 0;
+      _resetTimer();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  void _resetTimer() {
+    _ticker?.cancel();
+    final seconds = _block.durationMinutes * 60;
+    _remainingSeconds = seconds;
+    _totalSeconds = seconds;
+    _running = false;
+    _isBreak = false;
+    _workFinished = false;
+  }
+
+  void _toggleTimer() {
+    if (_running) {
+      _ticker?.cancel();
+      setState(() => _running = false);
+      return;
+    }
+    setState(() => _running = true);
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      if (_remainingSeconds <= 1) {
+        _ticker?.cancel();
+        final wasBreak = _isBreak;
+        setState(() {
+          _remainingSeconds = 0;
+          _running = false;
+          if (_isBreak) {
+            _isBreak = false;
+            _remainingSeconds = _block.durationMinutes * 60;
+            _totalSeconds = _remainingSeconds;
+          } else {
+            _workFinished = true;
+          }
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(wasBreak
+                ? '휴식이 끝났어요. 다음 집중을 시작해요.'
+                : '집중 시간이 끝났어요. 완료 여부를 기록해 주세요.'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      } else {
+        setState(() => _remainingSeconds--);
+      }
+    });
+  }
+
+  void _startBreak() {
+    if (_block.breakAfterMinutes == 0) return;
+    _ticker?.cancel();
+    setState(() {
+      _isBreak = true;
+      _workFinished = false;
+      _remainingSeconds = _block.breakAfterMinutes * 60;
+      _totalSeconds = _remainingSeconds;
+    });
+    _toggleTimer();
+  }
+
+  Future<void> _markComplete() async {
+    setState(() => _savingCompletion = true);
+    try {
+      await widget.onCompleteBlock(_block);
+      if (!mounted) return;
+      final next = _blockIndex + 1;
+      setState(() {
+        _blockIndex = next >= widget.blocks.length ? _blockIndex : next;
+        _resetTimer();
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('학습 완료로 표시했어요.'),
+            behavior: SnackBarBehavior.floating),
+      );
+    } finally {
+      if (mounted) setState(() => _savingCompletion = false);
+    }
+  }
+
+  void _changeBlock(int delta) {
+    final next = _blockIndex + delta;
+    if (next < 0 || next >= widget.blocks.length) return;
+    setState(() {
+      _blockIndex = next;
+      _resetTimer();
+    });
+  }
+
+  String get _timeLabel {
+    final minutes = _remainingSeconds ~/ 60;
+    final seconds = _remainingSeconds % 60;
+    return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress =
+        _totalSeconds == 0 ? 0.0 : _remainingSeconds / _totalSeconds;
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: _greenDark,
+        borderRadius: BorderRadius.circular(22),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.timer_outlined, color: Color(0xffc8ead2)),
+              SizedBox(width: 8),
+              Text('학습 타이머',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                      fontSize: 17)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _isBreak ? '휴식 중 · ${_block.breakAfterMinutes}분' : _block.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Color(0xffd6e6dc), height: 1.35),
+          ),
+          const SizedBox(height: 18),
+          Center(
+            child: SizedBox(
+              width: 136,
+              height: 136,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CircularProgressIndicator(
+                    value: progress.clamp(0.0, 1.0),
+                    strokeWidth: 9,
+                    backgroundColor: const Color(0xff3d6858),
+                    color: const Color(0xffb9dfc9),
+                  ),
+                  Center(
+                    child: Text(
+                      _timeLabel,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 27),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 17),
+          Row(
+            children: [
+              IconButton(
+                onPressed: _blockIndex == 0 ? null : () => _changeBlock(-1),
+                color: Colors.white,
+                icon: const Icon(Icons.skip_previous_rounded),
+              ),
+              Expanded(
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xffb9dfc9),
+                      foregroundColor: _greenDark),
+                  onPressed: _workFinished ? null : _toggleTimer,
+                  icon: Icon(_running
+                      ? Icons.pause_rounded
+                      : Icons.play_arrow_rounded),
+                  label: Text(_running
+                      ? '일시정지'
+                      : _isBreak
+                          ? '휴식 시작'
+                          : '집중 시작'),
+                ),
+              ),
+              IconButton(
+                onPressed: _blockIndex + 1 >= widget.blocks.length
+                    ? null
+                    : () => _changeBlock(1),
+                color: Colors.white,
+                icon: const Icon(Icons.skip_next_rounded),
+              ),
+              IconButton(
+                onPressed: _resetTimer,
+                color: const Color(0xffc8ead2),
+                icon: const Icon(Icons.restart_alt_rounded),
+              ),
+            ],
+          ),
+          if (_workFinished) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                if (_block.breakAfterMinutes > 0)
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: _startBreak,
+                      style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Color(0xff87b19b))),
+                      child: Text('${_block.breakAfterMinutes}분 휴식'),
+                    ),
+                  ),
+                if (_block.breakAfterMinutes > 0) const SizedBox(width: 10),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: _savingCompletion ? null : _markComplete,
+                    child: Text(_savingCompletion ? '저장 중...' : '완료 처리'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 4),
+          Center(
+            child: Text('${_blockIndex + 1} / ${widget.blocks.length}번째 학습',
+                style: const TextStyle(color: Color(0xffb5d0c0), fontSize: 12)),
+          ),
+        ],
       ),
     );
   }
@@ -1744,8 +2583,8 @@ class _ContentItemSheetState extends State<ContentItemSheet> {
                   controller: _chapter,
                   autofocus: true,
                   decoration: InputDecoration(
-                    labelText: widget.kind == PlanKind.book ? '장' : '단계',
-                    hintText: widget.kind == PlanKind.book ? '예: 1장' : '예: 1단계',
+                    labelText: widget.kind == PlanKind.book ? '장' : '과목',
+                    hintText: widget.kind == PlanKind.book ? '예: 1장' : '예: 수학',
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -1753,7 +2592,7 @@ class _ContentItemSheetState extends State<ContentItemSheet> {
                   controller: _section,
                   decoration: InputDecoration(
                     labelText:
-                        widget.kind == PlanKind.book ? '절 · 선택' : '분류 · 선택',
+                        widget.kind == PlanKind.book ? '절 · 선택' : '단원 · 선택',
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -1761,7 +2600,7 @@ class _ContentItemSheetState extends State<ContentItemSheet> {
                   controller: _title,
                   decoration: InputDecoration(
                     labelText:
-                        widget.kind == PlanKind.book ? '학습할 제목' : '실행할 내용',
+                        widget.kind == PlanKind.book ? '학습할 제목' : '학습할 단원',
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -2061,6 +2900,7 @@ class _ScheduleDayCard extends StatelessWidget {
   const _ScheduleDayCard({
     required this.day,
     required this.completed,
+    required this.dailyCheckIn,
     required this.adjusting,
     required this.onEdit,
     required this.onToggle,
@@ -2068,6 +2908,7 @@ class _ScheduleDayCard extends StatelessWidget {
 
   final ScheduleDay day;
   final Set<String> completed;
+  final bool? dailyCheckIn;
   final bool adjusting;
   final VoidCallback onEdit;
   final Future<void> Function(String, bool) onToggle;
@@ -2108,6 +2949,18 @@ class _ScheduleDayCard extends StatelessWidget {
                 ),
               ],
             ),
+            if (dailyCheckIn != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 7),
+                child: Text(
+                  dailyCheckIn! ? '✓ 일일 학습 완료 확인' : '↻ 미완료 분량 일정 재조정 완료',
+                  style: TextStyle(
+                    color: dailyCheckIn! ? _green : _muted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
             if (day.note.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 2, bottom: 6),
